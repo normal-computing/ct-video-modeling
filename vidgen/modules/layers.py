@@ -126,6 +126,31 @@ class Upsample(nn.Module):
         return self.upsample(x)
 
 
+class LearnableUpsample(nn.Module):
+    __doc__ = r"""Upsamples a given tensor by a factor of 2. Uses resize convolution to avoid checkerboard artifacts.
+
+    Input:
+        x: tensor of shape (N, in_channels, H, W)
+    Output:
+        tensor of shape (N, in_channels, H * 2, W * 2)
+    Args:
+        in_channels (int): number of input channels
+    """
+
+    def __init__(self, in_channels):
+        super().__init__()
+
+        self.upsample = nn.Sequential(
+            nn.ConvTranspose2d(
+                in_channels, in_channels, 3, stride=2, padding=1, output_padding=1
+            ),
+            nn.Conv2d(in_channels, in_channels, 3, padding=1),
+        )
+
+    def forward(self, x):
+        return self.upsample(x)
+
+
 class ResidualAttentionBlock(nn.Module):
     __doc__ = r"""Applies QKV self-attention with a residual connection.
     
