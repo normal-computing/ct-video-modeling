@@ -1,0 +1,12 @@
+lightning
+torchcde
+torchdiffeq
+scienceplots
+ipython
+black
+torch
+wandb == 0.13
+torchsde
+moviepy
+imageio
+torchvision

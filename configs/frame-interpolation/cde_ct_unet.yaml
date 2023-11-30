@@ -1,0 +1,73 @@
+# General settings
+seed: 2023
+
+# Training settings
+max_epochs: 100
+gradient_clip_val: 0.5
+accumulate_grad_batches: 2
+
+# Saving intervals
+batch_frequency: 100
+
+logger:
+  target: vidgen.utils.callbacks.VideoInterpolationLogger
+  params:
+    batch_frequency: 5000
+    downsample_factor: 0.5
+
+model:
+  target: vidgen.model.VideoModel
+  params:
+    lr: 3e-4
+
+    cde_function:
+      target: vidgen.modules.cde.ct_upsampler.ContinuousTimeUNet
+      params:
+        integration_method: midpoint
+        rtol: 1e-2
+        atol: 1e-2
+
+        function:
+          target: vidgen.modules.cde.ct_upsampler.CDEFunction
+          params: 
+            in_channels: 4
+            base_channels: 256
+            channel_mults:
+              - 1
+              - 2
+              - 4
+
+        in_channels: 3
+        latent_channels: 4
+        base_channels: 128
+        channel_mults:
+          - 2
+          - 2
+          - 4
+
+
+data:
+  target: vidgen.data.multi.CollectiveDataloader
+  params:
+    dataloader_params:
+      x4:
+        num_workers: 8
+        batch_size: 5
+        shuffle: true
+      vimeo:
+        num_workers: 8
+        batch_size: 10
+        shuffle: true
+      vimeo_septuplet:
+        num_workers: 8
+        batch_size: 5
+        shuffle: true
+    datasets:
+      x4:
+        path: dataset/X4K1000FPS
+        num_frames: 5
+      vimeo_septuplet:
+        path: dataset/vimeo_septuplet
+        septuplet: true
+      vimeo:
+        path: dataset/vimeo_triplet

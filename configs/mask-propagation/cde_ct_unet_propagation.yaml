@@ -1,0 +1,78 @@
+# General settings
+seed: 2023
+
+# Training settings
+max_epochs: 1000
+gradient_clip_val: 0.5
+accumulate_grad_batches: 2
+
+# Saving intervals
+batch_frequency: 100
+
+logger:
+  target: vidgen.utils.callbacks.MaskPropagationLogger
+  params:
+    batch_frequency: 1500
+    downsample_factor: 0.5
+
+model:
+  target: vidgen.propagation.VideoModel
+  params:
+    lr: 3e-5
+
+    cde_function:
+      target: vidgen.modules.cde.ct_propagation.ContinuousTimeUNet
+      params:
+        integration_method: midpoint
+        rtol: 1e-2
+        atol: 1e-2
+
+        function:
+          target: vidgen.modules.cde.ct_propagation.CDEFunction
+          params: 
+            in_channels: 4
+            base_channels: 256
+            channel_mults:
+              - 1
+              - 2
+              - 4
+
+        mask_encoder:
+          target: vidgen.modules.cde.ct_propagation.MaskEncoder
+          params:
+            base_channels: 64
+            latent_channels: 4
+            channel_mults:
+              - 1
+              - 2
+              - 4
+
+        output_channels: 1
+        in_channels: 3
+        latent_channels: 4
+        base_channels: 128
+        channel_mults:
+          - 2
+          - 2
+          - 4
+
+data:
+  target: vidgen.data.multi.CollectiveDataloader
+  params:
+    dataloader_params:
+      davis:
+        num_workers: 8
+        batch_size: 3
+        shuffle: true
+      youtube:
+        num_workers: 8
+        batch_size: 3
+        shuffle: true
+    datasets:
+      davis:
+        path: dataset/DAVIS
+        num_frames: 10
+      youtube:
+        path: dataset/YouTube
+        num_frames: 8 # max is 8
+
