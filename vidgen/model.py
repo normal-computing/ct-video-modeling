@@ -1,5 +1,5 @@
 from vidgen.utils import instantiate_from_config
-from vidgen.modules.loss import compute_psnr
+from vidgen.modules.loss import LapLoss, compute_psnr
 
 from typing import Any, Dict, Mapping
 
@@ -8,6 +8,8 @@ from torchmetrics.image import StructuralSimilarityIndexMeasure as SSIM
 import pytorch_lightning as pl
 import torchvision
 import random
+
+import numpy as np
 
 from einops import rearrange
 import torch.nn.functional as F
@@ -40,6 +42,8 @@ class VideoModel(pl.LightningModule):
                 param.requires_grad = False
             self.vgg16_conv_4_3 = vgg16_conv_4_3
 
+        # self.lap_loss = LapLoss(max_levels=3)
+
         self.lr = lr
         self.epoch_loss_metrics = {}
         self.ssim_metric = SSIM(data_range=1.0)
@@ -60,9 +64,6 @@ class VideoModel(pl.LightningModule):
     def load_state_dict(self, state_dict: Mapping[str, Any], strict: bool = True):
         return super().load_state_dict(state_dict, False)
 
-    def solver(self, z, ts, spline_ts):
-        return self.cde_model(z, ts, spline_ts)
-
     def midpoint_interpolation(self, x, depth=1):
         for _ in range(depth):
             n = x.size(1)
@@ -72,38 +73,28 @@ class VideoModel(pl.LightningModule):
 
         return x
 
-    def forward(self, x, factor=2):
-        n = x.size(1) - 1
-        spline_ts = torch.arange(0, n + 1).to(x)
-        solver_ts = torch.linspace(0, n, factor * n + 1).to(x)
+    # def inference(self, x, factor, midpoint=True):
+    #     grab_idx = list(range(0, x.size(1)))
+    #     if midpoint:
+    #         for i in range(1, int(np.log2(factor)) + 1):
+    #             n = x.size(1)
+    #             spline_ts = torch.linspace(0, n - 1, n).to(x)
+    #             solver_ts = torch.linspace(0, n - 1, 2 * n - 1).to(x)
+    #             x_out = self.cde_model(x, solver_ts, spline_ts)
+
+    #             replace_idx = [i for i in range(0, x_out.size(1), 2**i)]
+    #             x_out[:, replace_idx] = x[:, grab_idx]
+    #             grab_idx = replace_idx
+    #             x = x_out
+    #         return x
+
+    #     x_out = self(x, factor)
+    #     replace_idx = [i for i in range(0, x_out.size(1), factor)]
+    #     x_out[:, replace_idx] = x[:, grab_idx]
+    #     return x_out
+
+    def forward(self, x, spline_ts, solver_ts):
         return self.cde_model(x, solver_ts, spline_ts)
-
-    def subsample_frames(self, batch):
-        rn = random.uniform(0, 1)
-        if batch.size(1) >= 9:
-            if rn < 0.33:
-                return batch[:, :9:4]
-            if 0.33 < rn < 0.67:
-                return batch[:, :9:2]
-            return batch
-
-        if batch.size(1) >= 5:
-            if rn < 0.5:
-                return batch[:, :5:2]
-            return batch
-
-        return batch
-
-    def get_subsample_factor(self, n_frames):
-        if n_frames == 7:
-            return 2
-
-        subsample_choices = []
-        for i in range(1, 5):
-            if 2**i + 1 > n_frames:
-                break
-            subsample_choices.append(2**i)
-        return random.choice(subsample_choices)
 
     def add_to_epoch_metrics(self, key, value):
         if key not in self.epoch_loss_metrics:
@@ -141,37 +132,70 @@ class VideoModel(pl.LightningModule):
 
         perceptual_loss = 0.0
         l1_reconstructions = 0.0
+        # spline_reg_loss = 0.0
         for batch in batch_dict.values():
             assert batch.size(1) % 2 == 1, "Number of input frames must be odd"
 
-            batch = self.subsample_frames(batch)
-            # output = self.midpoint_interpolation(batch[:, ::2])
-            interp_f = self.get_subsample_factor(batch.size(1))
-            output = self(batch[:, ::interp_f], factor=interp_f)
+            n_frames = batch.size(1)
+            # solver_ts = torch.arange(0, batch.size(1) - 1).to(batch)
+            solver_ts = torch.arange(0, batch.size(1)).to(batch)
+            if n_frames == 3:
+                idx_list = [0, 2]
+                spline_ts = torch.tensor(idx_list).to(batch)
+            else:
+                keep_frames_idx = list(range(1, n_frames - 1))
+                subset_size = random.randint(0, len(keep_frames_idx) - 1)
+                keep_frames_idx = sorted(random.sample(keep_frames_idx, subset_size))
+                idx_list = [0] + keep_frames_idx + [n_frames - 1]
+                spline_ts = torch.tensor(idx_list).to(batch)
 
-            l1_reconstructions += F.l1_loss(output, batch)
+            # matches = torch.isin(solver_ts, spline_ts)
+            # generation_idx = torch.nonzero(~matches).squeeze()
+
+            # output = self(batch[:, idx_list], spline_ts, solver_ts)[:, generation_idx]
+            # batch = batch[:, generation_idx]
+
+            # if batch.ndim == 4:
+            #     batch, output = batch.unsqueeze(1), output.unsqueeze(1)
+
+            output = self(batch[:, idx_list], spline_ts, solver_ts)
+
+            # l1_loss = self.lap_loss(output, batch)
+            l2_loss = ((output - batch) ** 2 + 1e-6) ** 0.5
+            l1_reconstructions += l2_loss.mean()  # + l1_loss.mean()
+            # for layer in self.cde_model.encoder:
+            #     if hasattr(layer, "fit_spline"):
+            #         spline_derivs = torch.stack(
+            #             [layer.static.derivative(t) for t in solver_ts], dim=1
+            #         )
+            #         spline_reg_loss += spline_derivs.abs().mean()
+
             if self.vgg16_conv_4_3:
                 perceptual_loss += self.perceptual_loss(output, batch)
 
-        l1_reconstructions /= len(batch_dict)
-        perceptual_loss /= len(batch_dict)
+            self.compute_eval_metrics(output, batch, "train")
 
+        # self.log("n_frames", len(solver_ts) - len(spline_ts), prog_bar=True)
         self.log("train_rec", l1_reconstructions, prog_bar=True)
-        self.add_to_epoch_metrics("train_rec", l1_reconstructions)
-        self.compute_eval_metrics(output, batch, "train")
+        # self.log("train_spline_reg", spline_reg_loss, prog_bar=True)
+        # self.add_to_epoch_metrics("train_rec", l1_reconstructions)
 
         if self.vgg16_conv_4_3:
             self.log("train_perceptual", perceptual_loss, prog_bar=True)
             self.add_to_epoch_metrics("train_perceptual", perceptual_loss)
 
-            return 0.7 * l1_reconstructions + 0.3 * perceptual_loss
+            return l1_reconstructions + 1e-2 * perceptual_loss
 
-        return l1_reconstructions
+        return l1_reconstructions  # + 1e-2 * spline_reg_loss
 
     def validation_step(self, batch, batch_idx):
         assert batch.size(1) % 2 == 1, "Number of input frames must be odd"
 
-        output = self.midpoint_interpolation(batch[:, ::2])
+        solver_ts = torch.arange(0, batch.size(1)).to(batch)
+        spline_ts = torch.arange(0, batch.size(1), 2).to(batch)
+
+        output = self(batch[:, ::2], spline_ts, solver_ts)[:, 1::2]
+        batch = batch[:, 1::2]
         l1_reconstructions = F.l1_loss(output, batch)
         self.log("valid_rec", l1_reconstructions, prog_bar=True)
         self.add_to_epoch_metrics("valid_rec", l1_reconstructions)
@@ -183,7 +207,7 @@ class VideoModel(pl.LightningModule):
             self.log("valid_perceptual", perceptual_loss, prog_bar=True)
             self.add_to_epoch_metrics("valid_perceptual", perceptual_loss)
 
-            return 0.7 * l1_reconstructions + 0.3 * perceptual_loss
+            return l1_reconstructions + 1e-2 * perceptual_loss
 
         return l1_reconstructions
 
@@ -194,10 +218,10 @@ class VideoModel(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = optim.Adam(
-            self.get_parameters(), lr=self.lr, amsgrad=False, weight_decay=1e-6
+            self.get_parameters(), lr=self.lr, amsgrad=False, weight_decay=1e-4
         )
         # lr_scheduler = CosineAnnealingLR(optimizer, T_max=5)
-        return {"optimizer": optimizer}  # , s"lr_scheduler": lr_scheduler}
+        return {"optimizer": optimizer}  # , "lr_scheduler": lr_scheduler}
 
     def naive_interpolation(self, frames, factor=2):
         n_frames = frames.size(1) - 1
@@ -221,10 +245,9 @@ class VideoModel(pl.LightningModule):
 
         output_vid = torch.tensor([], dtype=batch.dtype)
         for idx in range(sample_frames.size(1) - 1):
-            # curr_interp = self.midpoint_interpolation(
-            #     sample_frames[:, idx : idx + 2], depth=depth
-            # )
-            curr_interp = self(sample_frames[:, idx : idx + 2], factor=interp_f)
+            solver_ts = torch.arange(0, interp_f + 1).to(batch)
+            spline_ts = torch.tensor([0, interp_f]).to(batch)
+            curr_interp = self(sample_frames[:, idx : idx + 2], spline_ts, solver_ts)
             output_vid = torch.cat([output_vid, curr_interp[:, :-1].cpu()], dim=1)
         output_vid = torch.cat([output_vid, sample_frames[:, -1:].cpu()], dim=1)
 
