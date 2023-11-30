@@ -150,4 +150,3 @@ dependencies:
       - torchsde==0.2.5
       - typing-inspect==0.9.0
       - xformers==0.0.20
-prefix: /home/paperspace/miniconda/envs/vidgen
